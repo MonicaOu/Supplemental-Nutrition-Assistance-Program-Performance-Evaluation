@@ -20,7 +20,7 @@ different household sizes correspond to different income thresholds, we decide t
 Since people on average stay on SNAP for about 3 months, we decide to use a rolling 3-month window to estimate SNAP enrollement. 
 
 ## Data Source 
-
+![Capture1](https://user-images.githubusercontent.com/76879882/103465788-8c100480-4d04-11eb-8a9f-c82bccebe488.PNG)
 
 ## Insights 
 ### Tracts to focus on 
