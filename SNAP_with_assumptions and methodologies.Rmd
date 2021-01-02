@@ -1,0 +1,534 @@
+---
+title: "SNAP Performance"
+date: "12/17/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readxl)
+library(dplyr)
+library(tidyverse)
+library(tidyr)
+library(zoo)
+library(jsonlite)
+library(lubridate)
+library(stats)
+library(cluster)
+```
+
+# Methodologies 
+To analyze the performance of SNAP Program, we decide to look at SNAP penetration
+rates and analyze how they differ across geographic and demographics. SANP penetration 
+rate here is defined as the percentage of eligible people currently enroll in SNAP. 
+We also understand that estimating SNAP performance solely based on one metric might 
+be less comprehensive, hence we also consider the number of people that are missing out from the program as well.
+
+We decide to calculate SNAP penetration rates per tract first, and based on that 
+we do a clustering analysis on demographics such as ages, races and gender etc, where
+demographics information is selected based on the significance of its relationship with 
+penetration rates. 
+
+To calculate SANP penetration rates per tract, we need to first estimate the number of eligible people per tract. Since SNAP eligibility is defined on a household level where 
+different household sizes correspond to different income thresholds, we
+decide to estimate the number of eligible households and translate eligible households into eligible people. For example, if a 4-person household is eligible, then we would say 
+all people in that household, a total of 4, are eligible for SNAP. 
+
+
+# Metrics Calculation (Penetration Rate & Number of People Missing Out)
+
+## Assumption 1: estimate incomes per household size and per tract
+Median household income per household size per tract, along with margin of error 
+can be found online. 
+(https://censusreporter.org/data/table/?table=B19019&geo_ids=05000US27053,140%7C05000US27053&primary_geo_id=05000US27053) 
+We assume that income distribution per household size 
+and per tract follows a T-Distribution, with median income as the mean and standard 
+deviation can be calculated from margin of error (std = moe * sqrt(sample size) / z-score)
+
+```{r income per household size and per tract, echo=TRUE, warning = FALSE}
+income<- read.csv('median_income_tract_household_size.csv')
+```
+
+## Assumption 2: deal with missing income data
+When estimating the income distribution, we find out that several data is missing. We decide to fill in the gap by first calculate the mean number of workers per household size and per tract. Number of workers per household size and per tract can be found online(https://censusreporter.org/data/table/?table=B08202&geo_ids=05000US27053,140%7C05000US27053&primary_geo_id=05000US27053#valueType%7Cpercentage). Then we use the mean number of workers per household size and per tract times median income of a worker of that tract to estimate the median household income.
+
+Data on number of houses per household types per tract can be found online(https://censusreporter.org/data/table/?table=B08202&geo_ids=05000US27053,140%7C05000US27053&primary_geo_id=05000US27053#valueType%7Cpercentage)
+
+```{r estimate number of workers per household per tract, echo=TRUE, warning=FALSE}
+# size contains information on number of houses per household type 
+# (only up tp 4 person household) and per tract 
+size <- read.csv('Number_of_household_per_tract_per_size.csv')
+
+# household contains information on number of houses per household type 
+# (1-7 person household) and per tract
+household <- read.csv('household_size.csv')
+household <- household %>% select(-ends_with('Error'))
+household$person_1 <- household$B11016010
+household$person_2 <- household$B11016003 + household$B11016011
+household$person_3 <- household$B11016004 + household$B11016012
+household$person_4 <- household$B11016005 + household$B11016013
+household$person_5 <- household$B11016006 + household$B11016014
+household$person_6 <- household$B11016007 + household$B11016015
+household$person_7 <- household$B11016008 + household$B11016016
+household <- household %>% select('geoid', 'name', 'B11016001', starts_with('person'))
+colnames(household)[3] <- 'Total'
+
+# End goal: get the percentage of workers in the house per household size 
+# for example: 1-person household: 50% no-worker, 50% 1-worker; 
+# then on average: 0.5 worker in a 1-person household 
+# why: fill in missing income: median income per worker * percentage of worker 
+# per household 
+size <- size %>% left_join(household %>% 
+            select(-name, -Total, - person_1, -person_2, -person_3), by = 'geoid')
+
+# calculate the number of workers per household type 
+# pctw stands for percentage of worker 
+size$person_1_pctw <- size$person_1_1_worker * 1 / size$person_1
+size$person_2_pctw <- size$person_2_1_worker / size$person_2 * 1 +
+size$person_2_2_worker / size$person_2 * 2
+size$person_3_pctw <- size$person_3_1_worker / size$person_3 * 1 + 
+size$person_3_2_worker / size$person_3 * 2 + size$person_3_3_worker / 
+size$person_3 * 3
+size$person_4_more_pctw <- size$person_4_1_worker/size$person_4_more * 1 + 
+size$person_4_2_worker/size$person_4_more * 2 + 
+size$person_4_3_worker/size$person_4_more* 3
+
+size <- size %>% select('geoid','name','Total', 
+                        'person_1','person_2','person_3','person_4',
+                        'person_5','person_6','person_7', ends_with('pctw'))
+# up to now, size contains information on number of houses per household type 
+# (up tp 7-person household) per tract, and number of workers per household type 
+# per tract.
+```
+
+```{r fill in missing income data, echo =TRUE, warning = FALSE}
+# Assumption: median income per worker * number of workers estimate in a household
+income_size <- income %>% inner_join(size, by = c("geoid", "name"))
+income_size$geoid <- as.numeric(gsub('14000US', '', income_size$geoid))
+
+# median income per worker per tract 
+median_income_worker <- read_excel('Median_income_per_worker.xlsx')
+median_income_worker<-  median_income_worker %>% select(-ends_with('Error'))
+median_income_worker <- median_income_worker %>% select(-Label) %>% 
+  pivot_longer(1:301,names_to='geo', values_to ='median_income' )
+median_income_worker$name <-''
+for(i in 1:301){
+  median_income_worker[i, 'name']<- paste(c(
+    strsplit(median_income_worker$geo[i], ",")[[1]][1], " Hennepin", ' MN'), collapse = ",")
+}
+
+# Up to now, income_size contains information on median household income along 
+# with margin of error per household type and per tract, number of houses per household 
+# size and per tract, and number of workers per household size and per tract
+income_size <- income_size %>% left_join(median_income_worker[, c('name', 
+    'median_income')],  by = "name")
+
+# Fill in missing income data
+# 1-person household 
+income_size$X1.person <- ifelse(is.na(income_size$X1.person), 
+          income_size$median_income*income_size$person_1_pctw, income_size$X1.person)
+
+# 2-person household 
+income_size$X2.person <- ifelse(is.na(income_size$X2.person), 
+          income_size$median_income*income_size$person_2_pctw , income_size$X2.person)
+
+# 3-person household 
+# when moe is missing but there's a number on the income line, it is always '250001'
+# so we need to replace that as well 
+income_size$X3.person <- ifelse(is.na(income_size$moe_3)|is.na(income_size$X3.person), 
+          income_size$median_income*income_size$person_3_pctw , income_size$X3.person)
+
+# 4-person household 
+income_size$X4.person <- ifelse(is.na(income_size$moe_4)|is.na(income_size$X4.person), 
+    income_size$median_income*income_size$person_4_more_pctw,income_size$X4.person)
+
+
+# 5-person household 
+income_size$X5.person <- ifelse(is.na(income_size$moe_5)|is.na(income_size$X5.person),          
+        income_size$median_income*income_size$person_4_more_pctw,income_size$X5.person)
+
+# 6-person household 
+income_size$X6.person <- ifelse(is.na(income_size$moe_6)|is.na(income_size$X6.person),          
+          income_size$median_income*income_size$person_4_more_pctw,income_size$X6.person)
+
+# 7-person household 
+income_size$X7.person <- ifelse(is.na(income_size$moe_7)|is.na(income_size$X7.person),                                                        
+  income_size$median_income*income_size$person_4_more_pctw,income_size$X7.person)
+
+# a NAN is spotted after replacing missing value with calculated income 
+# turns out the Tract 1052.01 does not have household size greater than or equal to 4-person
+# tract1052.01 <- income_size[income_size$geoid=='14000US27053105201',]
+# income_size <- income_size %>% filter(geoid !='14000US27053105201' )
+
+# Deal with missing Margin of Error 
+# assume the margin of error for missing data is the same as the margin of error for median income 
+income_size$moe_1<- ifelse(is.na(income_size$moe_1), income_size$Median_moe, 
+                           income_size$moe_1)
+income_size$moe_2<- ifelse(is.na(income_size$moe_2), income_size$Median_moe, 
+                           income_size$moe_2)
+# Tract 236 does not have margin of error associated with median income 
+# use the margin of error for 2-person household to replace NA
+income_size$moe_3<- ifelse(is.na(income_size$moe_3), ifelse(is.na(income_size$Median_moe),
+                        income_size$moe_2, income_size$Median_moe), income_size$moe_3)
+income_size$moe_4<- ifelse(is.na(income_size$moe_4), ifelse(is.na(income_size$Median_moe),
+                        income_size$moe_3, income_size$Median_moe), income_size$moe_4)
+income_size$moe_5<- ifelse(is.na(income_size$moe_5), ifelse(is.na(income_size$Median_moe),
+                        income_size$moe_4, income_size$Median_moe), income_size$moe_5)
+income_size$moe_6<- ifelse(is.na(income_size$moe_6), ifelse(is.na(income_size$Median_moe),
+                        income_size$moe_5, income_size$Median_moe), income_size$moe_6)
+income_size$moe_7<- ifelse(is.na(income_size$moe_7), ifelse(is.na(income_size$Median_moe),
+                        income_size$moe_6, income_size$Median_moe), income_size$moe_7)
+```
+
+## Assumption 3: estimate the number of eligible households per household size and per tract
+Using cumulative density function for T-Distribution and the corresponding income threshold per household size, we can find out the percentage of houses with household income less than the SNAP income threshold. Using the percentage calculated above times number of houses, we can estimate the number of eligible houses per household size and per tract.
+
+
+## Assumption 4: estimate the number of eligible people per tract 
+Once we have the number of eligible houses per household size and per tract, we can 
+use that times number of people in a household and sum up the total to get the number of eligible people per tract. 
+
+```{r estimate number of eligible person per tract, echo=TRUE, warning = FALSE}
+income_size$num <- round(pt((1307*12-income_size$X1.person)/(income_size$moe_1/1.96 *
+  sqrt(income_size$person_1)), df = income_size$person_1) * income_size$person_1,0)*1+ 
+  round(pt((1760*12-income_size$X2.person)/(income_size$moe_2/1.96 *
+   sqrt(income_size$person_2)), df = income_size$person_2) * income_size$person_2,0)*2+
+  round(pt((2213*12-income_size$X3.person)/(income_size$moe_3/1.96 *
+  sqrt(income_size$person_3)), df = income_size$person_3) * income_size$person_3,0)*3+
+  ifelse(income_size$person_4!=0, 
+  round(pt((2665*12-income_size$X4.person)/(income_size$moe_4/1.96 *
+  sqrt(income_size$person_4)), df = income_size$person_4) * income_size$person_4,0)*4, 0)+
+  ifelse(income_size$person_5!=0, 
+  round(pt((3118*12-income_size$X5.person)/(income_size$moe_5/1.96 *
+  sqrt(income_size$person_5)), df = income_size$person_5) * income_size$person_5,0)*5, 0)+
+  ifelse(income_size$person_6!=0, 
+  round(pt((3571*12-income_size$X6.person)/(income_size$moe_6/1.96 *
+  sqrt(income_size$person_6)), df = income_size$person_6) * income_size$person_6,0)*6, 0)+
+  ifelse(income_size$person_7 !=0, 
+  round(pt((4024*12-income_size$X7.person)/(income_size$moe_7/1.96 *
+  sqrt(income_size$person_7)), df = income_size$person_7) * income_size$person_7,0)*7, 0)
+
+```
+
+## Assumption 5: estimate the number of eligible households for 2017 and 2016
+The two websites listed above provide data in 2018. We first assume that number of 
+houses per household size and per tract is relatively stable from 2016 and 2018. 
+For income distribution, we calculate the percentage increase in median household income per tract from 2017 to 2018, and use that rate to adjust for the median household income per household size and per tract. Same applies to 2016. 
+
+```{r estimate number of eligible person for 2016 and 2017, echo=TRUE, warning=FALSE}
+# Project the income for year 2017 and 2016
+# income 2017 contains median household income per tract in 2017
+income2017 <- read_excel('Median_income_2017.xlsx')
+income2017 <- income2017 %>% pivot_longer(cols=starts_with('Census'), names_to='tract', 
+                                          values_to = 'Median_Income_2017')
+
+income2016_2018 <- read_excel('Median_income_2016_2018.xlsx')
+# income 2016 contains median household income per tract in 2016
+income2016 <- income2016_2018 %>% filter(Year==2016) %>% 
+  pivot_longer(cols=starts_with('Census'), names_to='tract', values_to = 'Median_Income_2016')
+
+# income 2018 contains median household income per tract in 2018
+income2018 <- income2016_2018 %>% filter(Year==2018) %>% 
+  pivot_longer(cols=starts_with('Census'), names_to='tract', values_to = 'Median_Income_2018')
+
+# Joining median incomes per tract from 2016 to 2018 together
+median_income <- income2016 %>% left_join(income2017 %>% 
+                              left_join(income2018, by = 'tract'), by = 'tract')
+median_income <- median_income %>% select(-starts_with('Year'))
+median_income$name <-''
+for(i in 1:299){
+  median_income[i, 'name']<- paste(c(
+    strsplit(median_income$tract[i], ",")[[1]][1], " Hennepin", ' MN'), collapse = ",")
+  
+}
+median_income <- median_income %>% left_join(income_size %>% 
+                                               select(geoid, name), by = "name")
+
+
+# Adjustment rate for 2017 
+income_rate_2017 <- median_income %>% select(geoid, Median_Income_2017, Median_Income_2018)%>%
+  mutate(rate = Median_Income_2017/Median_Income_2018)  %>%
+  select(geoid, rate)
+income_size_2017 <- income_size %>% select(-num) %>% left_join(income_rate_2017,
+                                                               by = "geoid")
+income_size_2017[, c(4:18, 31)]<- income_size_2017[, c(4:18, 31)]*income_size_2017$rate
+
+# Number of eligible people in 2017
+income_size_2017$num <- 
+  round(pt((1287*12-income_size_2017$X1.person)/(income_size_2017$moe_1/1.96 *
+  sqrt(income_size_2017$person_1)), df = income_size_2017$person_1) *
+  income_size_2017$person_1,0)*1+ 
+  round(pt((1736*12-income_size_2017$X2.person)/(income_size_2017$moe_2/1.96 *
+  sqrt(income_size_2017$person_2)), df = income_size_2017$person_2) * 
+  income_size_2017$person_2,0)*2+
+  round(pt((2184*12-income_size_2017$X3.person)/(income_size_2017$moe_3/1.96 *
+  sqrt(income_size_2017$person_3)), df = income_size_2017$person_3) * 
+  income_size_2017$person_3,0)*3+
+  ifelse(income_size_2017$person_4!=0, round(pt((2633*12-income_size_2017$X4.person)/
+  (income_size_2017$moe_4/1.96 *sqrt(income_size_2017$person_4)), df = 
+  income_size_2017$person_4) *income_size_2017$person_4,0)*4, 0)+
+  ifelse(income_size_2017$person_5!=0, 
+  round(pt((3081*12-income_size_2017$X5.person)/(income_size_2017$moe_5/1.96 *
+  sqrt(income_size_2017$person_5)), df = income_size_2017$person_5) * 
+  income_size_2017$person_5,0)*5, 0) +
+  ifelse(income_size_2017$person_6!=0, 
+  round(pt((3530*12-income_size_2017$X6.person)/(income_size_2017$moe_6/1.96 *
+  sqrt(income_size_2017$person_6)), df = income_size_2017$person_6) * 
+  income_size_2017$person_6,0)*6, 0)+
+  ifelse(income_size_2017$person_7 !=0, 
+  round(pt((3980*12-income_size_2017$X7.person)/(income_size_2017$moe_7/1.96 *
+  sqrt(income_size_2017$person_7)), df = income_size_2017$person_7) * 
+  income_size_2017$person_7,0)*7, 0)
+
+# Adjustment rate for 2016
+income_rate_2016 <- median_income %>% select(geoid, Median_Income_2016, 
+  Median_Income_2017)%>%
+  mutate(rate = Median_Income_2016/Median_Income_2017)  %>%
+  select(geoid, rate)
+income_size_2016 <- income_size_2017 %>% select(-num, -rate) %>% 
+  left_join(income_rate_2016,  by = "geoid")
+income_size_2016[, c(4:18, 31)]<- income_size_2016[, c(4:18, 31)]*income_size_2016$rate
+
+# Number of eligible people in 2016
+income_size_2016$num <- 
+  round(pt((1276*12-income_size_2016$X1.person)/(income_size_2016$moe_1/1.96 *
+  sqrt(income_size_2016$person_1)), df = income_size_2016$person_1) * 
+  income_size_2016$person_1,0)*1+ 
+  round(pt((1726*12-income_size_2016$X2.person)/(income_size_2016$moe_2/1.96 *
+  sqrt(income_size_2016$person_2)), df = income_size_2016$person_2) * 
+  income_size_2016$person_2,0)*2+
+  round(pt((2177*12-income_size_2016$X3.person)/(income_size_2016$moe_3/1.96 *
+  sqrt(income_size_2016$person_3)), df = income_size_2016$person_3) * 
+  income_size_2016$person_3,0)*3+
+  ifelse(income_size_2016$person_4!=0, round(pt((2628*12-income_size_2016$X4.person)/
+  (income_size_2016$moe_4/1.96 *sqrt(income_size_2016$person_4)), df = 
+  income_size_2016$person_4) *income_size_2016$person_4,0)*4, 0)+
+  ifelse(income_size_2016$person_5!=0, 
+  round(pt((3078*12-income_size_2016$X5.person)/(income_size_2016$moe_5/1.96 *
+  sqrt(income_size_2016$person_5)), df = income_size_2016$person_5) * 
+  income_size_2016$person_5,0)*5, 0) +
+  ifelse(income_size_2016$person_6!=0, 
+  round(pt((3529*12-income_size_2016$X6.person)/(income_size_2016$moe_6/1.96 *
+  sqrt(income_size_2016$person_6)), df = income_size_2016$person_6) * 
+  income_size_2016$person_6,0)*6, 0)+
+  ifelse(income_size_2016$person_7 !=0, 
+  round(pt((3980*12-income_size_2016$X7.person)/(income_size_2016$moe_7/1.96 *
+  sqrt(income_size_2016$person_7)), df = income_size_2016$person_7) * 
+  income_size_2016$person_7,0)*7, 0)
+
+```
+
+## Assumption 6: calculate the number of people enrolled in SNAP
+We decide to use a three-month rolling window to calculate the number of people 
+enrolled in SNAP because on average, people stay in SNAP for about 3 months
+
+```{r SANP penetration rate per tract from 2016-2018, echo =TRUE, warning =FALSE,message=FALSE}
+# SNAP is provided by Hennepin County
+snap <- read_excel('SNAP.xlsx')
+# filter out tract starts with 27053
+snap <- snap %>% filter(grepl('27053', tract))
+
+# Snap penetration rate per tract 
+snap_tract <- snap %>% group_by(elig_month, tract) %>% summarize(sum_people = 
+                       sum(people))%>% ungroup()
+snap_tract$elig_month <- as.Date(snap_tract$elig_month)
+
+# Number of people currently enrolls in SNAP (quarterly information from 2016-2018)
+qsnap <- snap_tract %>% group_by(tract) %>% mutate(avg = rollmean(sum_people, 
+  k = 3, fill=NA,align = 'left')) %>% ungroup() %>% filter(year(elig_month)!=2019) %>%
+  filter(month(elig_month)==1|month(elig_month)==4|month(elig_month)==7|
+  month(elig_month)==10)%>%
+  mutate(Year= year(elig_month), Quarter= ifelse(month(elig_month)==1, 1, 
+  ifelse(month(elig_month)==4, 2, ifelse(month(elig_month)==7, 3, 4)))) %>% 
+  select(-elig_month, -sum_people)
+colnames(qsnap)[1]<- 'geoid'
+
+
+
+elig<- bind_rows(income_size %>% mutate(Year=2018) %>% select(geoid, Year, num), 
+          income_size_2017 %>% mutate(Year=2017) %>% select(geoid, Year, num), 
+          income_size_2016 %>% mutate(Year=2016) %>% select(geoid, Year, num))
+elig<- na.omit(elig)
+
+qsnap <- qsnap %>% left_join(elig, by=c('geoid', 'Year'))
+qsnap$pct <- qsnap$avg/ qsnap$num
+# Missing information
+# geoid   avg  Year Quarter   num   pct
+# 1 27053025905    NA  2017       4  1056    NA
+# 2 27053023902    NA  2018       1   598    NA
+qsnap <- na.omit(qsnap)
+
+
+qsnap <- qsnap %>% left_join(income_size %>% select(geoid, Median), by ='geoid')
+# How does SNAP Penetration rate differ across different income levels
+qsnap$income_level <- ifelse(
+  qsnap$Median<=quantile(qsnap$Median,  probs = seq(0, 1, 0.2))[[2]], 'Low', 
+  ifelse(qsnap$Median<=quantile(qsnap$Median,  probs = seq(0, 1, 0.2))[[3]], 'Medium_Low',
+  ifelse(qsnap$Median<=quantile(qsnap$Median,  probs = seq(0, 1, 0.2))[[4]], 'Medium', 
+  ifelse(qsnap$Median<=quantile(qsnap$Median,  probs = seq(0, 1, 0.2))[[5]], 
+  'Medium_High', 'High'))))
+```
+
+## Assumption 7: penetration rate adjustment
+By comparing penetration rates with the percentage of total population currently enrolls
+in SNAP, we assume that we might over predict the number of eligible people in High 
+and medium high income area. In order to adjust it, we estimate the number of eligible people using 1.3 times number of people below federal poverty guideline (1.3 comes from 
+SNAP income threshold, which is 130% of FPG)
+
+```{r Penetration rate adjustment, echo=TRUE, warning =FALSE, message=FALSE}
+# pct of total population of that tract currently enrolls in SNAP
+# income_level   mean
+# <chr>         <dbl>
+# 1 High         0.0114
+# 2 Low          0.189 
+# 3 Medium       0.0518
+# 4 Medium_High  0.0297
+# 5 Medium_Low   0.0873
+
+qsnap %>% group_by(income_level) %>% summarize(mean = mean(pct, na.rm=TRUE)) %>% ungroup()
+# mean penetration rate: pct of eligible people currently enrolls in this program
+# income_level   mean
+# <chr>         <dbl>
+# 1 High         0.0357
+# 2 Low          0.456 
+# 3 Medium       0.167 
+# 4 Medium_High  0.0954
+# 5 Medium_Low   0.271 
+
+# As you can see, we might over predict the number of eligible people for tracts 
+# with High and Medium High Income 
+# Adjust the penetration rate for Medium_High and High_Income Area
+poverty <- read.csv('tract_poverty_data_acs5_2018.csv')
+poverty_2018 <- poverty %>% filter(Race_Ethnicity=='Total Population') %>% 
+  select('GEOID', 'Below_Poverty_Count', 'Below_Poverty_Margin')
+income_size <- income_size %>% left_join(poverty_2018, by = c('geoid'='GEOID'))
+income_size$below_threshold <- round(1.3 *                              
+                            (income_size$Below_Poverty_Count+income_size$Below_Poverty_Margin),0)
+qsnap <- qsnap %>% left_join(income_size %>% select(geoid, below_threshold), by = 'geoid')
+qsnap$adj_pct <- ifelse((qsnap$income_level=='High')|
+                      (qsnap$income_level=='Medium_High'), 
+                      qsnap$avg/qsnap$below_threshold, qsnap$pct)
+
+# after adjustment
+qsnap %>% group_by(income_level) %>% summarize(mean = mean(adj_pct)) %>% ungroup()
+
+
+# final adjustment
+# 6 rows greater than 1: all in year 2016 and for tract 1023(Low) and tract 1044(Medium Low)
+# adj_pct : 1-1.2, assume they are 1 
+final <- qsnap %>% select(geoid, Year, Quarter, income_level, below_threshold,adj_pct, 
+                          num, avg)
+final$num <- ifelse(final$income_level=='High'|final$income_level=='Medium_High', 
+                    final$below_threshold, final$num)
+final <- final %>% select(-below_threshold)
+
+# Column names of this "Final" document
+# adj_pct: stands for penetration rate 
+# num: stands for number of eligible people
+# avg: stands for number of people enrolled in SNAP
+
+```
+
+```{r Number of people that are missing out, echo=TRUE, warning =FALSE, message=FALSE}
+# Number of people that are missing out per tract 
+final$num_miss <- round(final$num - final$avg)
+# On average, we miss out 701 people per quarter per tract from 2016 to 2018
+mean(final$num_miss)
+# On average, we miss out 71% eligible people per tract 
+mean(final$num_miss/final$num)
+
+```
+
+# Clustering Analysis 
+Now that we have penetration rates and number of people that are missing out, we are interested in analyzing how they differ across demographics. Demographic data can be found online on Census Bureau.Besides demographics, We would like to know whether number of SNAP eligible stores is related to SNAP penetration rate or not. Hence, we also look at the distribution of SNAP eligible stores and calculate the number of SNAP stores per tract 
+
+```{r demographics information, echo=TRUE, warning =FALSE, message=FALSE  }
+# "Monica_merged.csv" is a cleaned excel file with demographics information 
+# such as ages, sex, races, median income and occupations
+c <- read.csv('Monica_merged.csv')
+c<- c %>% select(-X)
+# normalize data: percentage of total population of that tract 
+c[, 2:19] <- c[, 2:19]/c$Total
+
+# number of SNAP eligible stores per tract 
+store <- read.csv('SNAP_stores.csv')  
+c$geoid <- as.numeric(gsub('14000US', '', c$geoid))
+c <- c %>% left_join(store %>% select(GEOID10, SNAP_stores_1_mile), by = c('geoid' ='GEOID10'))
+
+# final is the quarterly rate csv
+c <- c %>% left_join(final %>% filter(Year==2018) %>% group_by(geoid) %>% 
+                       summarize(rate = mean(adj_pct), miss = mean(num_miss)) %>%  
+                       select(geoid, rate, miss))
+c<- na.omit(c)
+
+```
+
+## Assumptions 8: demographics variables selection
+We decide to use linear regression to select demographics variables, and see how much 
+would R-squared go up with an additional variable. After several trials, we find 
+out that sex, percentage of white people in that tract, percentage of African American in 
+that tract, number of SNAP eligible stores in that tract,the percentage of seniors(65+), 
+median household income give us the best prediction power. 
+
+We also realize that some variations in penetrations aren't captured by these 
+variables since the R-squared is relatively low. Further investigation is needed
+
+```{r cluster on rate, echo=TRUE, warning=FALSE, message =FALSE}
+set.seed(123)
+data <- c %>% select(Male, White.alone, Black.or.African.American.alone, 
+                     SNAP_stores_1_mile, X65.older, Median_income, rate)
+normalize = function(x){
+  return ((x - min(x))/(max(x) - min(x)))}
+data_norm <- data %>% mutate_at(c(1:7), normalize)
+dist_matrix <- dist(data_norm, method = "euclidean")
+
+# Choose the number of clusters
+SSE_curve <- c()
+for (n in 1:10) {
+  kcluster =   kmeans(data_norm, n)
+  sse = kcluster$tot.withinss
+  SSE_curve[n] = sse}
+# plot SSE against number of cluster
+plot(1:10, SSE_curve, type = "b")
+
+# based on the elbow plot, 3 is chosen
+kcluster <- kmeans(data_norm, centers = 3)
+data$cluster <- kcluster$cluster
+data %>% group_by(cluster) %>% summarize_all(mean) %>% ungroup()
+```
+
+```{r cluster on missing number, echo=TRUE, warning=FALSE, message =FALSE}
+set.seed(123)
+data1 <- c %>% select(Male, White.alone, Black.or.African.American.alone, 
+                     SNAP_stores_1_mile, X65.older, Median_income, miss)
+normalize = function(x){
+  return ((x - min(x))/(max(x) - min(x)))}
+data_norm1 <- data1 %>% mutate_at(c(1:7), normalize)
+dist_matrix1 <- dist(data_norm1, method = "euclidean")
+
+# Choose the number of clusters
+SSE_curve <- c()
+for (n in 1:10) {
+  kcluster =   kmeans(data_norm1, n)
+  sse = kcluster$tot.withinss
+  SSE_curve[n] = sse}
+# plot SSE against number of cluster
+plot(1:10, SSE_curve, type = "b")
+
+# based on the elbow plot, 3 is chosen
+kcluster <- kmeans(data_norm1, centers = 3)
+data1$cluster <- kcluster$cluster
+data1 %>% group_by(cluster) %>% summarize_all(mean) %>% ungroup()
+```
+
+```{r map}
+# For penetration rate, we are focusing on cluster 3 (the lowest)
+c$rate_cluster <- data$cluster 
+# For number of people missing out from SNAP, we are focusing on cluster 1(highest)
+c$num_cluster <- data1$cluster
+
+final<-final %>% left_join(c %>% select(geoid, ends_with('cluster')), by ='geoid')
+# 31 tracts that are low in penetration rate and have a lot of people that are missing out
+```
+
+
