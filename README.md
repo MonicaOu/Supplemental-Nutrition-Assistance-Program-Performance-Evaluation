@@ -23,6 +23,9 @@ Since people on average stay on SNAP for about 3 months, we decide to use a roll
 ![Capture1](https://user-images.githubusercontent.com/76879882/103465788-8c100480-4d04-11eb-8a9f-c82bccebe488.PNG)
 
 ## Insights 
+### Overview 
+![Capture3](https://user-images.githubusercontent.com/76879882/103466678-9a621e80-4d0c-11eb-8b27-d34f8b81c6ea.PNG)
+
 ### Tracts to focus on 
 ![Capture2](https://user-images.githubusercontent.com/76879882/103466437-d5635280-4d0a-11eb-90ff-8c6c29b96f3a.PNG)
 
