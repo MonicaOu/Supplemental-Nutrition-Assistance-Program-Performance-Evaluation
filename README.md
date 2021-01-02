@@ -22,7 +22,7 @@ Since people on average stay on SNAP for about 3 months, we decide to use a roll
 ## Data Source 
 ![Capture1](https://user-images.githubusercontent.com/76879882/103465788-8c100480-4d04-11eb-8a9f-c82bccebe488.PNG)
 
-## Insights 
+## Insights and Recommendations 
 ### Overview 
 ![Capture3](https://user-images.githubusercontent.com/76879882/103466678-9a621e80-4d0c-11eb-8b27-d34f8b81c6ea.PNG)
 
@@ -30,6 +30,7 @@ Since people on average stay on SNAP for about 3 months, we decide to use a roll
 ![Capture2](https://user-images.githubusercontent.com/76879882/103466437-d5635280-4d0a-11eb-90ff-8c6c29b96f3a.PNG)
 
 ### Age Group to focus on 
+Further investigation shows that seniors (age 65+) have a higher proportion in those focused tracts listed above. Data shows that 3 out 5 seniors are missing out on SNAP benefits in the US. Therefore, we believe besides focusing on tracts that have low penetration rates and high miss-out number, we also recommend Hennepin County provide extra help to seniors. We assume many seniors might not be aware of SNAP benefits, hence, we recommend putting out ads on radios since U.S. adults aged 50-64 listen to almost 15 hours of radio a week while adults 65+ listened to about 12 hours of radio weekly. Content can have an emphasis on medical expense deduction that would lower the income threshold for SNAP (only 16% utilize that), so that seniors can have a clue of whether they are eligible or not. Besides. we believe applications in paper format might not be accessible to seniors and many seniors struggle to apply online. we recommend mailing applications to seniors and putting paper application forms in places which are easily accessible to seniors, such as hospitals and SNAP eligible stores. 
 
 
 
